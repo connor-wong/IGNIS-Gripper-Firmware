@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <NimBLEDevice.h>
 
 /* Custom Libraries */
 #include "imu_driver.h"
@@ -6,7 +7,82 @@
 #include "encoder_driver.h"
 #include "mlx90614_driver.h"
 #include "mcp9808_driver.h"
-    
+
+// ====== Forward Declarations ======
+void handleCharacteristicWrite(uint8_t *data, size_t length);
+void setupBLE();
+
+// ====== BLE Configuration ======
+#define SERVICE_UUID        "12345678-1234-5678-1234-56789abcdef0"
+#define CHARACTERISTIC_UUID "12345678-1234-5678-1234-56789abcdef1"
+#define MTU_SIZE            512
+
+// ====== Callback Classes ======
+class MyCharacteristicCallback : public NimBLECharacteristicCallbacks {
+public:
+    void onWrite(NimBLECharacteristic *pCharacteristic, NimBLEConnInfo &connInfo) override {
+        std::string value = pCharacteristic->getValue();
+        handleCharacteristicWrite((uint8_t*)value.data(), value.length());
+    }
+};
+
+class MyServerCallbacks : public NimBLEServerCallbacks {
+public:
+    void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
+        Serial.println("\n📡 BLE Client Connected!");
+    }
+
+    void onDisconnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo, int reason) override {
+        Serial.println("\n📴 BLE Client Disconnected!");
+        NimBLEDevice::startAdvertising();
+    }
+};
+
+// ====== Data Handler ======
+void handleCharacteristicWrite(uint8_t *data, size_t length) {
+    if (length == 0) return;
+}
+
+// ====== BLE Setup ======
+void setupBLE() {
+    NimBLEDevice::init("IGNIS");
+    NimBLEDevice::setPower(9);
+    NimBLEDevice::setMTU(MTU_SIZE);
+
+    NimBLEServer *pServer = NimBLEDevice::createServer();
+    pServer->setCallbacks(new MyServerCallbacks());
+
+    NimBLEService *pService = pServer->createService(SERVICE_UUID);
+
+    NimBLECharacteristic *pCharacteristic = pService->createCharacteristic(
+        CHARACTERISTIC_UUID,
+        NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR | NIMBLE_PROPERTY::INDICATE,
+        MTU_SIZE * 2);
+
+    pCharacteristic->setCallbacks(new MyCharacteristicCallback());
+
+    NimBLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
+    NimBLEAdvertisementData advData;
+    advData.setFlags(BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP);
+    advData.setCompleteServices(NimBLEUUID(SERVICE_UUID));
+
+    NimBLEAdvertisementData scanResponse;
+    scanResponse.setName("IGNIS");
+
+    pAdvertising->setAdvertisementData(advData);
+    pAdvertising->setScanResponseData(scanResponse);
+    pAdvertising->enableScanResponse(true);
+    pAdvertising->setPreferredParams(0x06, 0x12);
+    pAdvertising->start();
+
+    Serial.println("\n✓ BLE Advertising started");
+    Serial.println("  Device Name: IGNIS");
+}
+
+// ---------------------------------------------------------------------------
+// Motor and Encoder
+// ---------------------------------------------------------------------------
+
 // Motor Driver
 MotorDriver motor(4, 5, 2, 3); // IN1=GPIO4, IN2=GPIO5, LEDC channels 2 & 3
 
