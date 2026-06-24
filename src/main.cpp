@@ -1,93 +1,28 @@
 #include <Arduino.h>
-#include <NimBLEDevice.h>
 
 /* Custom Libraries */
+#include "ble_driver.h"
 #include "imu_driver.h"
 #include "motor_driver.h"
 #include "encoder_driver.h"
-#include "mlx90614_driver.h"
+// #include "mlx90614_driver.h"
 #include "mcp9808_driver.h"
+#include "vl53l5cx_driver.h"
 
-// ====== Forward Declarations ======
-void handleCharacteristicWrite(uint8_t *data, size_t length);
-void setupBLE();
+// ---------------------------------------------------------------------------
+// BLE
+// ---------------------------------------------------------------------------
 
-// ====== BLE Configuration ======
-#define SERVICE_UUID        "12345678-1234-5678-1234-56789abcdef0"
-#define CHARACTERISTIC_UUID "12345678-1234-5678-1234-56789abcdef1"
-#define MTU_SIZE            512
+void onBLEReceive(uint8_t* data, size_t length);
 
-// ====== Callback Classes ======
-class MyCharacteristicCallback : public NimBLECharacteristicCallbacks {
-public:
-    void onWrite(NimBLECharacteristic *pCharacteristic, NimBLEConnInfo &connInfo) override {
-        std::string value = pCharacteristic->getValue();
-        handleCharacteristicWrite((uint8_t*)value.data(), value.length());
-    }
-};
-
-class MyServerCallbacks : public NimBLEServerCallbacks {
-public:
-    void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
-        Serial.println("\n📡 BLE Client Connected!");
-    }
-
-    void onDisconnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo, int reason) override {
-        Serial.println("\n📴 BLE Client Disconnected!");
-        NimBLEDevice::startAdvertising();
-    }
-};
-
-// ====== Data Handler ======
-void handleCharacteristicWrite(uint8_t *data, size_t length) {
-    if (length == 0) return;
-}
-
-// ====== BLE Setup ======
-void setupBLE() {
-    NimBLEDevice::init("IGNIS");
-    NimBLEDevice::setPower(9);
-    NimBLEDevice::setMTU(MTU_SIZE);
-
-    NimBLEServer *pServer = NimBLEDevice::createServer();
-    pServer->setCallbacks(new MyServerCallbacks());
-
-    NimBLEService *pService = pServer->createService(SERVICE_UUID);
-
-    NimBLECharacteristic *pCharacteristic = pService->createCharacteristic(
-        CHARACTERISTIC_UUID,
-        NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR | NIMBLE_PROPERTY::INDICATE,
-        MTU_SIZE * 2);
-
-    pCharacteristic->setCallbacks(new MyCharacteristicCallback());
-
-    NimBLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
-    NimBLEAdvertisementData advData;
-    advData.setFlags(BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP);
-    advData.setCompleteServices(NimBLEUUID(SERVICE_UUID));
-
-    NimBLEAdvertisementData scanResponse;
-    scanResponse.setName("IGNIS");
-
-    pAdvertising->setAdvertisementData(advData);
-    pAdvertising->setScanResponseData(scanResponse);
-    pAdvertising->enableScanResponse(true);
-    pAdvertising->setPreferredParams(0x06, 0x12);
-    pAdvertising->start();
-
-    Serial.println("\n✓ BLE Advertising started");
-    Serial.println("  Device Name: IGNIS");
-}
+BLEDriver ble;  // Uses default UUIDs, device name "IGNIS", MTU 512
 
 // ---------------------------------------------------------------------------
 // Motor and Encoder
 // ---------------------------------------------------------------------------
 
-// Motor Driver
-MotorDriver motor(4, 5, 2, 3); // IN1=GPIO4, IN2=GPIO5, LEDC channels 2 & 3
-
-// Encoder Driver
-EncoderDriver encoder(18, 19);   // yellow → 18, green → 19
+MotorDriver   motor(4, 5, 2, 3);    // IN1=GPIO4, IN2=GPIO5, LEDC ch 2 & 3
+EncoderDriver encoder(18, 19);       // yellow → GPIO18, green → GPIO19
 
 // ---------------------------------------------------------------------------
 // I2C Drivers (shared SDA=GPIO8, SCL=GPIO9)
@@ -96,60 +31,97 @@ EncoderDriver encoder(18, 19);   // yellow → 18, green → 19
 #define SDA_PIN 8
 #define SCL_PIN 9
 
-// IMU Driver | I2C address 0x68
-ImuDriver imu(SDA_PIN, SCL_PIN, MPU_DEFAULT_ADDR);
+ImuDriver      imu(SDA_PIN, SCL_PIN, MPU_DEFAULT_ADDR);
+// MLX90614Driver objTemp(SDA_PIN, SCL_PIN, MLX90614_DEFAULT_ADDR);
+MCP9808Driver  pcbTemp(SDA_PIN, SCL_PIN, MCP9808_DEFAULT_ADDR);
+VL53L5CXDriver tof(SDA_PIN, SCL_PIN, 5, VL53L5CX_RES_8X8, 15);
 
-// MLX90614 Driver | I2C address 0x5A
-MLX90614Driver objTemp(SDA_PIN, SCL_PIN, MLX90614_DEFAULT_ADDR);
+// ---------------------------------------------------------------------------
+// BLE write handler — called when client sends a command
+// ---------------------------------------------------------------------------
 
-// MCP9808 Driver | I2C address 0x18
-MCP9808Driver pcbTemp(SDA_PIN, SCL_PIN, MCP9808_DEFAULT_ADDR);
+void onBLEReceive(uint8_t* data, size_t length)
+{
+    if (length == 0) return;
+    // TODO: parse incoming commands (e.g. motor speed, config changes)
+}
+
+// ---------------------------------------------------------------------------
+// Timing
+// ---------------------------------------------------------------------------
 
 const unsigned long LOOP_INTERVAL_MS = 10;
 unsigned long previousMillis = 0;
 
-void setup() {
+// ---------------------------------------------------------------------------
+// Setup
+// ---------------------------------------------------------------------------
+
+void setup()
+{
     Serial.begin(115200);
 
-    // ---------------------------------------------------------------------------
-    // Sensors Initialization
-    // ---------------------------------------------------------------------------
+    // BLE
+    ble.onWrite(onBLEReceive);
+    ble.begin();
 
+    // IMU
     if (!imu.begin()) {
-        Serial.println("IMU init failed – check wiring.");
-        while (true) {}   // Halt; nothing useful to do without the sensor
+        Serial.println("IMU init failed");
+        while (true) {}
     }
-
     Serial.println("MPU initialized.");
     imu.calibrate();
 
+    // ToF
+    if (!tof.begin()) {
+        Serial.println("VL53L5CX init failed");
+        while (true) {}
+    }
+
+    // Temperature sensors
     // objTemp.begin();
     // pcbTemp.begin();
     // pcbTemp.setResolution(MCP9808_RES_0_0625);
 
-    // ---------------------------------------------------------------------------
-    // Motor and Encoder Initialization
-    // ---------------------------------------------------------------------------
-
+    // Motor and encoder
     // motor.begin();
     // encoder.begin();
     // motor.setSpeed(180);
 }
 
-void loop() {
+// ---------------------------------------------------------------------------
+// Loop
+// ---------------------------------------------------------------------------
+
+void loop()
+{
     unsigned long now = millis();
 
     if (now - previousMillis >= LOOP_INTERVAL_MS) {
         previousMillis = now;
 
+        // Read IMU and send over BLE
         ImuData data;
         imu.read(data);
-        ImuDriver::printJson(data);
+
+        // Build JSON into a stack buffer and send via BLE indicate
+        char buf[128];
+        snprintf(buf, sizeof(buf),
+            "{\"ax\":%.3f,\"ay\":%.3f,\"az\":%.3f,"
+            "\"gx\":%.3f,\"gy\":%.3f,\"gz\":%.3f}",
+            data.accelX, data.accelY, data.accelZ,
+            data.gyroX,  data.gyroY,  data.gyroZ);
+
+        if (ble.isConnected()) {
+            ble.indicate(buf);
+        } else {
+            Serial.println(buf);    // Fall back to Serial when no BLE client
+        }
     }
 
     // encoder.update();
-    // Serial.println(encoder.getRPM());
-    
     // objTemp.printJson();
     // pcbTemp.printJson();
+    // tof.printJson();
 }
